@@ -655,7 +655,7 @@ int main(int argc, char *argv[]) {
     // Bit 10 = DATA_STATUS (1 = status bajt se lepi na kraj DATA registra pri citanju)
     // Bit 8  = INT_REF_EN  (1 = ukljucuje internu referencu)
     // Bits 5-2 (MODE) = 0000 (Continuous Conversion Mode, vec je default)
-    ad4130_write_reg(spi_fd, AD4130_REG_ADC_CTRL, 0x4500, 2);
+    ad4130_write_reg(spi_fd, AD4130_REG_ADC_CTRL, 0x0500, 2);
 
 
     // VERIFIKACIJA UPISA - isto za ADC_CTRL
