@@ -111,6 +111,7 @@
 #define ERR_EN_MCLK_CNT         (UINT32_C(1) << 12) /* ukljucuje MCLK brojac (MCLK_COUNT)     */
 #define ERR_EN_ADC_ERR          (UINT32_C(1) << 7)  /* flag: rezultat u klipovanju / saturacija modulatora */
 #define ERR_EN_SPI_IGNORE       (UINT32_C(1) << 6)  /* flag: SPI pristup dok je ADC zauzet (default 1) */
+#define ERR_EN_ROM_CRC          (UINT32_C(1) << 0)  /* ROM CRC provera, cita se nazad kao 1 i kad se upise 0     */
 
 /* CHANNEL_m bitovi */
 #define CH_ENABLE               (UINT32_C(1) << 23)
@@ -267,10 +268,11 @@ static int cfg_soft_reset(int fd)
 
 /* KORAK 1: provera komunikacije.
  * ID (0x05): SILICON_ID[3:2] = 01, MODEL_ID[1:0] = 01 za LFCSP -> ocekuje se 0x05.
- * STATUS (0x00): citanjem se brise POR_FLAG (bit 4) koji je postavljen posle reseta. */
+ * STATUS (0x00): citanjem se brise POR_FLAG (bit 4) koji je postavljen posle reseta.
+ * ERROR_EN (0x07): samo citanje, da se vidi stanje posle reseta (datasheet: 0x0040). */
 static int cfg_check_comm(int fd)
 {
-    uint32_t id = 0, st = 0;
+    uint32_t id = 0, st = 0, err_en = 0;
 
     if (ad4130_read_reg(fd, REG_ID, 1, &id) < 0) return -1;
     printf("  ID registar = 0x%02X (ocekivano 0x05 za LFCSP)\n", (unsigned)id);
@@ -284,6 +286,9 @@ static int cfg_check_comm(int fd)
     if (ad4130_read_reg(fd, REG_STATUS, 1, &st) < 0) return -1;
     printf("  STATUS posle reseta = 0x%02X (POR_FLAG=%u, ocekivano 1 pri prvom citanju)\n",
            (unsigned)st, (unsigned)((st & ST_POR_FLAG) ? 1 : 0));
+
+    if (ad4130_read_reg(fd, REG_ERROR_EN, 2, &err_en) < 0) return -1;
+    printf("  ERROR_EN posle reseta = 0x%04X (po datasheet-u 0x0040)\n", (unsigned)err_en);
     return 0;
 }
 
@@ -291,10 +296,13 @@ static int cfg_check_comm(int fd)
  *   bit 12 MCLK_CNT_EN  = 1 -> MCLK_COUNT registar broji (provera da oscilator radi)
  *   bit  7 ADC_ERR_EN   = 1 -> flag kad je rezultat u klipovanju (van opsega) ili modulator u saturaciji
  *   bit  6 SPI_IGNORE_ERR_EN = 1 -> flag ako SPI pristup dodje dok ADC nije spreman (default ukljucen)
- * Sve ostalo je 0. Rezultat: 0x10C0 */
+ *   bit  0 ROM_CRC_ERR_EN    = 1 -> prijava ROM CRC greske. Po datasheet-u (Table 83) bit je R/W, reset 0,
+ *                                   ali se na ploci cita nazad kao 1 i kad se upise 0, pa ga upisujemo
+ *                                   kao 1 da bi provera upisa prosla (ukljucen je bezopasan)
+ * Sve ostalo je 0. Rezultat: 0x10C1 */
 static int cfg_error_enable(int fd)
 {
-    uint32_t v = ERR_EN_MCLK_CNT | ERR_EN_ADC_ERR | ERR_EN_SPI_IGNORE;
+    uint32_t v = ERR_EN_MCLK_CNT | ERR_EN_ADC_ERR | ERR_EN_SPI_IGNORE | ERR_EN_ROM_CRC;
 
     return ad4130_write_verify(fd, REG_ERROR_EN, v, 2, "ERROR_EN");
 }

@@ -1,0 +1,26 @@
+# Prevedeni programi (Makefile)
+dac_us
+ad4130_test
+
+# Objektni fajlovi i editor backup-i
+*.o
+*~
+*.swp
+
+# Kernel modul (make.sh)
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+Module.symvers
+modules.order
+.tmp_versions/
+
+# Generisano iz tplload.l / tplload.y (flex/bison)
+lex.yy.c
+*.tab.c
+*.tab.h
+
+# Fajlovi nastali greskom kod scp bez ':' (npr. scp fajl root@10.1.49.17)
+root@*
