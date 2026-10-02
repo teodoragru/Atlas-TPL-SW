@@ -102,7 +102,7 @@
  *        Za konverziju napona na Vin_x prikljucku pomnozi sa faktorom slabljenja  ~ 3.3V
  */
 double adc_code_to_volts(uint32_t code) {
-    return (((double)code / 8388608.0) - 1.0) * (ADC_VREF / ADC_GAIN);
+    return ((double)code / 8388608.0) * (ADC_VREF / ADC_GAIN);
 }
 
 /* Port expander funkcije za upis i citanje registara */
@@ -661,8 +661,8 @@ int main(int argc, char *argv[]) {
     // VERIFIKACIJA UPISA - isto za ADC_CTRL
     {
         uint32_t readback = ad4130_read_reg(spi_fd, AD4130_REG_ADC_CTRL, 2);
-        printf("Verifikacija ADC_CTRL: poslato 0x4500, procitano nazad 0x%04X %s\n",
-               readback, (readback == 0x4500) ? "-> OK" : "-> Not OK");
+        printf("Verifikacija ADC_CTRL: poslato 0x0500, procitano nazad 0x%04X %s\n",
+               readback, (readback == 0x0500) ? "-> OK" : "-> Not OK");
     }
 
 
