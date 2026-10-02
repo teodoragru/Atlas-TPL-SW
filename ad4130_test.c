@@ -22,6 +22,8 @@
  *   -f FS    FS filtera sinc3, 1..2047                      (podrazumevano 48 -> 50 SPS)
  *   -n N     broj uzoraka, 0 = do Ctrl+C                    (podrazumevano 0)
  *   -k F     faktor za prikaz napona na konektoru           (podrazumevano 1.0, za Vin kanale 4.3)
+ *   -B N     burnout test (provera prekinutog ulaza): struja u AINP
+ *            1 = 0.5 uA, 2 = 2 uA, 3 = 4 uA                  (podrazumevano 0 = iskljuceno)
  *   -D DEV   SPI uredjaj                                    (podrazumevano /dev/spidev0.0)
  *   -v       ispis sirovih SPI bajtova
  *   -h       pomoc
@@ -30,6 +32,8 @@
  *   ./ad4130_test -p 3 -k 4.3      AIN3 prema AVSS, prikazuje i napon * 4.3
  *   ./ad4130_test -d -n 50         dijagnostika, ocekivano ~0.55 V (AVDD = 3.3 V)
  *   ./ad4130_test -p 4 -m 5        diferencijalno AIN4 - AIN5 (strujni ulaz Iin1)
+ *   ./ad4130_test -p 3 -B 3 -n 20  AIN3 sa 4 uA burnout strujom: povezan ulaz se pomeri malo
+ *                                  (I * R izvora), prekinut ulaz ode u pun opseg (0xFFFFFF)
  */
 
 #define _GNU_SOURCE
@@ -129,6 +133,7 @@
 #define CFG_REF_REFOUT_AVSS     2                       /* 10 = REFOUT/AVSS = interna referenca */
 #define CFG_PGA(x)              ((uint32_t)(x) << 1)    /* bitovi [3:1], 0 = gain 1            */
 #define CFG_PGA_BYP             (UINT32_C(1) << 0)      /* 1 = PGA premosten (gain fiksno 1)   */
+#define CFG_BURNOUT(x)          ((uint32_t)(x) << 8)    /* bitovi [9:8]: 0 off, 1 0.5 uA, 2 2 uA, 3 4 uA */
 
 /* FILTER_n bitovi */
 #define FILT_MODE(x)            ((uint32_t)(x) << 12)   /* bitovi [15:12]                      */
@@ -149,6 +154,7 @@ typedef struct {
     unsigned    fs;         /* FS sinc3 filtera                             */
     long        n_samples;  /* 0 = beskonacno                               */
     double      disp_factor;/* faktor za prikaz napona na konektoru         */
+    unsigned    burnout;    /* BURNOUT_n kod 0..3 (0 = iskljuceno)          */
 } test_cfg_t;
 
 static int g_verbose = 0;
@@ -297,8 +303,9 @@ static int cfg_check_comm(int fd)
  *   bit  7 ADC_ERR_EN   = 1 -> flag kad je rezultat u klipovanju (van opsega) ili modulator u saturaciji
  *   bit  6 SPI_IGNORE_ERR_EN = 1 -> flag ako SPI pristup dodje dok ADC nije spreman (default ukljucen)
  *   bit  0 ROM_CRC_ERR_EN    = 1 -> prijava ROM CRC greske. Po datasheet-u (Table 83) bit je R/W, reset 0,
- *                                   ali se na ploci cita nazad kao 1 i kad se upise 0, pa ga upisujemo
- *                                   kao 1 da bi provera upisa prosla (ukljucen je bezopasan)
+ *                                   ali na ploci je vec posle reseta 1 (ERROR_EN = 0x0041) i cita se
+ *                                   nazad kao 1 i kad se upise 0, pa ga upisujemo kao 1 da bi provera
+ *                                   upisa prosla (ukljucen je bezopasan)
  * Sve ostalo je 0. Rezultat: 0x10C1 */
 static int cfg_error_enable(int fd)
 {
@@ -339,14 +346,16 @@ static int cfg_setup0(int fd, const test_cfg_t *c)
     /* CONFIG_0 (0x19, 2 bajta):
      *   [15:13] I_OUT1_n  = 000 -> ekscitaciona struja 1 iskljucena
      *   [12:10] I_OUT0_n  = 000 -> ekscitaciona struja 0 iskljucena
-     *   [ 9: 8] BURNOUT_n = 00  -> burnout struje iskljucene
+     *   [ 9: 8] BURNOUT_n = c->burnout -> 00 iskljuceno (default); sa -B: 01 0.5 uA, 10 2 uA, 11 4 uA.
+     *                       Struja tece iz AINP kroz spoljno kolo i vraca se u AINM. Ako je ulaz
+     *                       prekinut, nema puta za struju i napon ode u pun opseg (datasheet, Burnout Currents)
      *   [    7] REF_BUFP_n = 0  -> bafer na REFIN(+) nije potreban (koristimo internu referencu)
      *   [    6] REF_BUFM_n = 0  -> bafer na REFIN(-) nije potreban
      *   [ 5: 4] REF_SEL_n = 10  -> REFOUT/AVSS = interna referenca (2.5 V)
      *   [ 3: 1] PGA_n     = 000 -> gain 1
      *   [    0] PGA_BYP_n = 0   -> PGA ukljucen (fabricka kalibracija pojacanja je radjena sa PGA_BYP = 0)
-     * Rezultat: 0x0020 */
-    uint32_t config0 = CFG_REF_SEL(CFG_REF_REFOUT_AVSS) | CFG_PGA(0);
+     * Rezultat: 0x0020 (bez burnout-a), 0x0320 sa -B 3 */
+    uint32_t config0 = CFG_BURNOUT(c->burnout) | CFG_REF_SEL(CFG_REF_REFOUT_AVSS) | CFG_PGA(0);
 
     /* FILTER_0 (0x21, 3 bajta):
      *   [23:21] SETTLE_n      = 000 -> front-end settling 32 MCLK (~0.4 ms) pre konverzije
@@ -462,6 +471,22 @@ static int ad4130_configure(int fd, const test_cfg_t *c)
 /* Konverzija 24-bitnog koda u napon na ulazu ADC-a (AINP - AINM).
  *   unipolarno (BIPOLAR = 0): Vin = code / 2^24 * VREF / gain      (0 V = 0x000000, VREF = 0xFFFFFF)
  *   bipolarno  (BIPOLAR = 1): Vin = (code / 2^23 - 1) * VREF / gain (0 V = 0x800000) */
+/* Ime ulaza za ispis: 0..15 -> "AIN3", interni kodovi -> "AVSS", "AVDD/6+"... */
+static const char *ain_name(uint8_t code)
+{
+    static char buf[2][8];
+    static int k = 0;
+
+    switch (code) {
+    case AIN_AVSS:        return "AVSS";
+    case AIN_AVDD_DIV6_P: return "AVDD/6+";
+    case AIN_AVDD_DIV6_M: return "AVDD/6-";
+    }
+    k ^= 1;     /* dva bafera, da bi ain_name() moglo dvaput u istom printf-u */
+    snprintf(buf[k], sizeof(buf[k]), "AIN%u", (unsigned)code);
+    return buf[k];
+}
+
 static double code_to_volts(uint32_t code, int bipolar)
 {
     if (bipolar) return ((double)code / 8388608.0 - 1.0) * (ADC_VREF_V / ADC_GAIN);
@@ -554,8 +579,8 @@ static int run_measurement(int fd, const test_cfg_t *c)
             double v_adc = code_to_volts(code, c->bipolar);
             double v_con = v_adc * c->disp_factor;
 
-            printf("#%-5ld CH%u  kod=%8u (0x%06X)", printed + 1, (unsigned)(status & ST_CH_ACTIVE),
-                   (unsigned)code, (unsigned)code);
+            printf("#%-5ld CH%u (%s-%s)  kod=%8u (0x%06X)", printed + 1, (unsigned)(status & ST_CH_ACTIVE),
+                   ain_name(c->ainp), ain_name(c->ainm), (unsigned)code, (unsigned)code);
             if (c->bipolar) printf(" [rel. %+d]", (int)code - 0x800000);
             printf("  Vadc=%+9.6f V", v_adc);
             if (c->disp_factor != 1.0) printf("  Vkonektor=%+9.4f V", v_con);
@@ -586,7 +611,7 @@ static int run_measurement(int fd, const test_cfg_t *c)
 
 static void usage(const char *prog)
 {
-    printf("Upotreba: %s [-p AINP] [-m AINM|avss] [-d] [-b] [-f FS] [-n N] [-k F] [-D DEV] [-v]\n"
+    printf("Upotreba: %s [-p AINP] [-m AINM|avss] [-d] [-b] [-f FS] [-n N] [-k F] [-B N] [-D DEV] [-v]\n"
            "  -p N     pozitivni ulaz AIN0..AIN15 (default 3)\n"
            "  -m N     negativni ulaz 0..15 ili 'avss' (default avss = single-ended)\n"
            "  -d       dijagnostika: meri (AVDD-AVSS)/6, ocekivano ~0.55 V za AVDD = 3.3 V\n"
@@ -594,6 +619,7 @@ static void usage(const char *prog)
            "  -f FS    FS sinc3 filtera 1..2047 (default 48 -> 50 SPS); ODR = 76800/32/FS\n"
            "  -n N     broj uzoraka (0 = do Ctrl+C)\n"
            "  -k F     faktor za prikaz napona na konektoru (npr. 4.3)\n"
+           "  -B N     burnout test (provera prekinutog ulaza): 1 = 0.5 uA, 2 = 2 uA, 3 = 4 uA\n"
            "  -D DEV   SPI uredjaj (default %s)\n"
            "  -v       ispis sirovih SPI bajtova\n", prog, SPI_DEVICE_DEFAULT);
 }
@@ -628,8 +654,9 @@ int main(int argc, char **argv)
     cfg.fs = 48;
     cfg.n_samples = 0;
     cfg.disp_factor = 1.0;
+    cfg.burnout = 0;
 
-    while ((opt = getopt(argc, argv, "p:m:dbf:n:k:D:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:m:dbf:n:k:B:D:vh")) != -1) {
         switch (opt) {
         case 'p':
             if (parse_long(optarg, 0, 15, &v) < 0) { fprintf(stderr, "-p: 0..15\n"); return EXIT_FAILURE; }
@@ -657,6 +684,10 @@ int main(int argc, char **argv)
             cfg.disp_factor = k;
             break;
         }
+        case 'B':
+            if (parse_long(optarg, 0, 3, &v) < 0) { fprintf(stderr, "-B: 0..3\n"); return EXIT_FAILURE; }
+            cfg.burnout = (unsigned)v;
+            break;
         case 'D': cfg.spi_dev = optarg; break;
         case 'v': g_verbose = 1; break;
         case 'h':
@@ -676,6 +707,11 @@ int main(int argc, char **argv)
            cfg.diag_avdd ? " (dijagnostika AVDD/6)" : "",
            cfg.bipolar ? "bipolarno (offset binary)" : "unipolarno (straight binary)",
            cfg.fs, AD4130_MCLK_HZ / 32.0 / (double)cfg.fs, ADC_VREF_V, ADC_GAIN);
+    if (cfg.burnout) {
+        static const char *const ua[] = { "", "0.5", "2", "4" };
+        printf("BURNOUT TEST: %s uA tece u AINP. Povezan ulaz -> mali pomak (I * R izvora),\n"
+               "              prekinut ulaz -> pun opseg 0xFFFFFF + ADC_ERR.\n\n", ua[cfg.burnout]);
+    }
 
     fd = open(cfg.spi_dev, O_RDWR);
     if (fd < 0) {
