@@ -24,6 +24,8 @@
  *   -k F     faktor za prikaz napona na konektoru           (podrazumevano 1.0, za Vin kanale 4.3)
  *   -B N     burnout test (provera prekinutog ulaza): struja u AINP
  *            1 = 0.5 uA, 2 = 2 uA, 3 = 4 uA                  (podrazumevano 0 = iskljuceno)
+ *   -t N     PT100 kanal 1..4: 4-zicno ratiometrijsko merenje (IOUT0 200 uA, REFIN1 = Rref 4k99,
+ *            gain 8), ispis R [ohm] i T [C]. Postavlja AINP/AINM/IOUT sam, -p/-m se ignorisu.
  *   -D DEV   SPI uredjaj                                    (podrazumevano /dev/spidev0.0)
  *   -v       ispis sirovih SPI bajtova
  *   -h       pomoc
@@ -31,6 +33,7 @@
  * Primeri:
  *   ./ad4130_test -p 3 -k 4.3      AIN3 prema AVSS, prikazuje i napon * 4.3
  *   ./ad4130_test -d -n 50         dijagnostika, ocekivano ~0.55 V (AVDD = 3.3 V)
+ *   ./ad4130_test -t 1 -n 50       PT100_1 (IOUT AIN0, merenje AIN1-AIN2), 100 ohm -> ~0 C
  *   ./ad4130_test -p 4 -m 5        diferencijalno AIN4 - AIN5 (strujni ulaz Iin1)
  *   ./ad4130_test -p 3 -B 3 -n 20  AIN3 sa 4 uA burnout strujom: povezan ulaz se pomeri malo
  *                                  (I * R izvora), prekinut ulaz ode u pun opseg (0xFFFFFF)
@@ -61,7 +64,7 @@
 #define SPI_MODE_AD4130     SPI_MODE_3  /* CPOL=1, CPHA=1 */
 
 #define ADC_VREF_V          2.5         /* interna referenca, INT_REF_VAL = 0 -> 2.5 V   */
-#define ADC_GAIN            1.0         /* PGA gain, mora da odgovara CONFIG_0 (PGA_n)   */
+#define ADC_PGA_CODE        0           /* PGA_n za naponski rezim: 0 -> gain 1          */
 #define AD4130_MCLK_HZ      76800.0     /* interni oscilator                             */
 
 #define USE_CS_PIN          1           /* 1 = CSB_EN=1 (4-wire, CS uokviruje transfer),
@@ -72,6 +75,25 @@
 #define READY_TIMEOUT_MS    3000        /* koliko najduze cekamo RDYB = 0                  */
 #define TWR_DEL_US          100         /* pauza posle upisa (tWR_DEL = 3..4 / fMCLK ~ 52 us) */
 #define REF_SETTLE_US       2000        /* cekanje da se interna referenca umiri (280 us tipicno) */
+
+/* PT100 (-t N), sema PT100 / U7:
+ *   PT100_N: IIN = AIN(3N-3) (izlaz IOUT0), VOUTP = AIN(3N-2), VOUTN = AIN(3N-1)
+ *   Struja se za sva 4 senzora vraca kroz zajednicki IREF -> Rref (R25 4k99 0.1%) -> R27 255R -> GND.
+ *   Napon na Rref ide na REFIN1(+)/REFIN1(-) (preko R24/R26 4k99), pa je merenje ratiometrijsko:
+ *     kod / 2^24 = gain * I * Rpt / (I * Rref)  =>  Rpt = kod / 2^24 * Rref / gain
+ *   i ne zavisi od tacne vrednosti struje.
+ *   I = 200 uA: Vref = 200 uA * 4k99 = 1.0 V (REFIN1(-) je na 200 uA * 255R = 51 mV iznad GND).
+ *   gain 8: pun opseg = Rref / 8 = 624 ohm (~ 650 C), Pt100 na 0 C = 100 ohm = 16% opsega. */
+#define PT100_RREF_OHM      4990.0
+#define PT100_IOUT_CODE     6           /* I_OUT0_n: 110 = 200 uA (vidi CFG_I_OUT0)     */
+#define PT100_PGA_CODE      3           /* PGA_n: 011 = gain 8                           */
+#define PT100_REF_BUF       1           /* 1 = REF_BUFP/REF_BUFM ukljuceni (4k99 na REFIN
+                                           ulazima bi bez bafera pravilo gresku). Ako se
+                                           javlja REF_OV_UV, probaj 0.                    */
+#define PT100_R0            100.0       /* Callendar-Van Dusen, IEC 60751 */
+#define PT100_A             3.9083e-3
+#define PT100_B             (-5.775e-7)
+#define PT100_C             (-4.183e-12)
 
 
 /* ====================================================================== */
@@ -122,6 +144,7 @@
 #define CH_SETUP(x)             ((uint32_t)(x) << 20)   /* koji setup (CONFIG/FILTER/OFFSET/GAIN) */
 #define CH_AINP(x)              ((uint32_t)(x) << 13)
 #define CH_AINM(x)              ((uint32_t)(x) << 8)
+#define CH_IOUT0_CH(x)          ((uint32_t)(x) & 0xF)   /* bitovi [3:0]: pin na koji izlazi IOUT0 */
 
 /* Kodovi ulaza za AINP / AINM (CHANNEL_m): 0..15 = AIN0..AIN15, plus: */
 #define AIN_AVSS                17      /* analogna masa -> single-ended merenje */
@@ -130,7 +153,13 @@
 
 /* CONFIG_n bitovi */
 #define CFG_REF_SEL(x)          ((uint32_t)(x) << 4)    /* bitovi [5:4]                        */
+#define CFG_REF_REFIN1          0                       /* 00 = REFIN1(+)/REFIN1(-)             */
 #define CFG_REF_REFOUT_AVSS     2                       /* 10 = REFOUT/AVSS = interna referenca */
+#define CFG_I_OUT0(x)           ((uint32_t)(x) << 10)   /* bitovi [12:10]: 000 off, 001 10 uA, 010 20 uA,
+                                                           011 50 uA, 100 100 uA, 101 150 uA, 110 200 uA,
+                                                           111 100 nA */
+#define CFG_REF_BUFP            (UINT32_C(1) << 7)
+#define CFG_REF_BUFM            (UINT32_C(1) << 6)
 #define CFG_PGA(x)              ((uint32_t)(x) << 1)    /* bitovi [3:1], 0 = gain 1            */
 #define CFG_PGA_BYP             (UINT32_C(1) << 0)      /* 1 = PGA premosten (gain fiksno 1)   */
 #define CFG_BURNOUT(x)          ((uint32_t)(x) << 8)    /* bitovi [9:8]: 0 off, 1 0.5 uA, 2 2 uA, 3 4 uA */
@@ -155,6 +184,8 @@ typedef struct {
     long        n_samples;  /* 0 = beskonacno                               */
     double      disp_factor;/* faktor za prikaz napona na konektoru         */
     unsigned    burnout;    /* BURNOUT_n kod 0..3 (0 = iskljuceno)          */
+    unsigned    pt100;      /* 0 = naponski rezim, 1..4 = PT100 kanal        */
+    unsigned    pga;        /* PGA_n kod, gain = 2^pga                      */
 } test_cfg_t;
 
 static int g_verbose = 0;
@@ -345,17 +376,24 @@ static int cfg_setup0(int fd, const test_cfg_t *c)
 {
     /* CONFIG_0 (0x19, 2 bajta):
      *   [15:13] I_OUT1_n  = 000 -> ekscitaciona struja 1 iskljucena
-     *   [12:10] I_OUT0_n  = 000 -> ekscitaciona struja 0 iskljucena
+     *   [12:10] I_OUT0_n  = 000 -> ekscitaciona struja 0 iskljucena; PT100: 110 = 200 uA
      *   [ 9: 8] BURNOUT_n = c->burnout -> 00 iskljuceno (default); sa -B: 01 0.5 uA, 10 2 uA, 11 4 uA.
      *                       Struja tece iz AINP kroz spoljno kolo i vraca se u AINM. Ako je ulaz
      *                       prekinut, nema puta za struju i napon ode u pun opseg (datasheet, Burnout Currents)
-     *   [    7] REF_BUFP_n = 0  -> bafer na REFIN(+) nije potreban (koristimo internu referencu)
-     *   [    6] REF_BUFM_n = 0  -> bafer na REFIN(-) nije potreban
-     *   [ 5: 4] REF_SEL_n = 10  -> REFOUT/AVSS = interna referenca (2.5 V)
-     *   [ 3: 1] PGA_n     = 000 -> gain 1
+     *   [    7] REF_BUFP_n = 0  -> bafer na REFIN(+) nije potreban (koristimo internu referencu); PT100: PT100_REF_BUF
+     *   [    6] REF_BUFM_n = 0  -> bafer na REFIN(-) nije potreban; PT100: PT100_REF_BUF
+     *   [ 5: 4] REF_SEL_n = 10  -> REFOUT/AVSS = interna referenca (2.5 V); PT100: 00 = REFIN1 (napon na Rref)
+     *   [ 3: 1] PGA_n     = c->pga -> 000 gain 1; PT100: 011 gain 8
      *   [    0] PGA_BYP_n = 0   -> PGA ukljucen (fabricka kalibracija pojacanja je radjena sa PGA_BYP = 0)
-     * Rezultat: 0x0020 (bez burnout-a), 0x0320 sa -B 3 */
-    uint32_t config0 = CFG_BURNOUT(c->burnout) | CFG_REF_SEL(CFG_REF_REFOUT_AVSS) | CFG_PGA(0);
+     * Rezultat: 0x0020 (bez burnout-a), 0x0320 sa -B 3, PT100: 0x18C6 */
+    uint32_t config0 = CFG_BURNOUT(c->burnout) | CFG_PGA(c->pga);
+
+    if (c->pt100) {
+        config0 |= CFG_I_OUT0(PT100_IOUT_CODE) | CFG_REF_SEL(CFG_REF_REFIN1);
+        if (PT100_REF_BUF) config0 |= CFG_REF_BUFP | CFG_REF_BUFM;
+    } else {
+        config0 |= CFG_REF_SEL(CFG_REF_REFOUT_AVSS);
+    }
 
     /* FILTER_0 (0x21, 3 bajta):
      *   [23:21] SETTLE_n      = 000 -> front-end settling 32 MCLK (~0.4 ms) pre konverzije
@@ -378,11 +416,14 @@ static int cfg_setup0(int fd, const test_cfg_t *c)
  *   [17:13] AINP_m      = c->ainp -> pozitivni ulaz (3 = AIN3)
  *   [12: 8] AINM_m      = c->ainm -> negativni ulaz (17 = AVSS -> single-ended)
  *   [ 7: 4] I_OUT1_CH_m = 0, [3:0] I_OUT0_CH_m = 0 -> bez efekta, struje su iskljucene u CONFIG_0
+ *           PT100: I_OUT0_CH_m = 3N-3 -> IOUT0 izlazi na IIN pin senzora (AIN0/3/6/9)
  * Ostali kanali (CHANNEL_1..15) su posle reseta iskljuceni, pa ih ne diramo.
  * Primer: AIN3 prema AVSS -> 0x807100 */
 static int cfg_channel0(int fd, const test_cfg_t *c)
 {
     uint32_t ch0 = CH_ENABLE | CH_SETUP(0) | CH_AINP(c->ainp) | CH_AINM(c->ainm);
+
+    if (c->pt100) ch0 |= CH_IOUT0_CH(3 * c->pt100 - 3);
 
     return ad4130_write_verify(fd, REG_CHANNEL(0), ch0, 3, "CHANNEL_0");
 }
@@ -487,10 +528,21 @@ static const char *ain_name(uint8_t code)
     return buf[k];
 }
 
-static double code_to_volts(uint32_t code, int bipolar)
+static double pga_gain(const test_cfg_t *c)
 {
-    if (bipolar) return ((double)code / 8388608.0 - 1.0) * (ADC_VREF_V / ADC_GAIN);
-    return (double)code / 16777216.0 * (ADC_VREF_V / ADC_GAIN);
+    return (double)(1u << c->pga);
+}
+
+/* Isto kao napon, samo sa VREF = 1: odnos (AINP - AINM) / VREF */
+static double code_to_ratio(uint32_t code, const test_cfg_t *c)
+{
+    if (c->bipolar) return ((double)code / 8388608.0 - 1.0) / pga_gain(c);
+    return (double)code / 16777216.0 / pga_gain(c);
+}
+
+static double code_to_volts(uint32_t code, const test_cfg_t *c)
+{
+    return code_to_ratio(code, c) * ADC_VREF_V;
 }
 
 /* Cekanje da RDYB (STATUS bit 7) padne na 0 = nov rezultat u DATA registru.
@@ -548,6 +600,24 @@ static double my_sqrt(double x)
     return r;
 }
 
+/* Pt100 otpornost -> temperatura (Callendar-Van Dusen, IEC 60751).
+ *   T >= 0 C: R = R0 (1 + A T + B T^2)                    -> resava se kvadratna jednacina
+ *   T <  0 C: R = R0 (1 + A T + B T^2 + C (T - 100) T^3)  -> Newton, polazi od kvadratnog resenja */
+static double pt100_temp(double r)
+{
+    double t = (-PT100_A + my_sqrt(PT100_A * PT100_A - 4.0 * PT100_B * (1.0 - r / PT100_R0)))
+               / (2.0 * PT100_B);
+    int i;
+
+    if (r >= PT100_R0) return t;
+    for (i = 0; i < 10; i++) {
+        double f  = PT100_R0 * (1.0 + PT100_A * t + PT100_B * t * t + PT100_C * (t - 100.0) * t * t * t) - r;
+        double df = PT100_R0 * (PT100_A + 2.0 * PT100_B * t + PT100_C * (4.0 * t * t * t - 300.0 * t * t));
+        t -= f / df;
+    }
+    return t;
+}
+
 /* Glavna petlja merenja: ispisuje svaki uzorak, na kraju statistiku */
 static int run_measurement(int fd, const test_cfg_t *c)
 {
@@ -575,8 +645,16 @@ static int run_measurement(int fd, const test_cfg_t *c)
         taken++;
         if (taken <= WARMUP_SAMPLES) continue;      /* odbaci prve uzorke posle starta */
 
-        {
-            double v_adc = code_to_volts(code, c->bipolar);
+        if (c->pt100) {
+            double r_pt = code_to_ratio(code, c) * PT100_RREF_OHM;
+
+            printf("#%-5ld PT100_%u (%s-%s)  kod=%8u (0x%06X)  R=%9.4f ohm  T=%+8.3f C\n",
+                   printed + 1, c->pt100, ain_name(c->ainp), ain_name(c->ainm),
+                   (unsigned)code, (unsigned)code, r_pt, pt100_temp(r_pt));
+            stats_add(&st, r_pt);
+            printed++;
+        } else {
+            double v_adc = code_to_volts(code, c);
             double v_con = v_adc * c->disp_factor;
 
             printf("#%-5ld CH%u (%s-%s)  kod=%8u (0x%06X)", printed + 1, (unsigned)(status & ST_CH_ACTIVE),
@@ -592,7 +670,14 @@ static int run_measurement(int fd, const test_cfg_t *c)
         if (status & ST_MASTER_ERR) report_errors(fd);
     }
 
-    if (st.n > 1) {
+    if (st.n > 1 && c->pt100) {
+        double sd = my_sqrt(st.m2 / (double)(st.n - 1));
+        /* dR/dT ~ R0 * A = 0.39 ohm/C oko 0 C, pa sigma u C priblizno sd / 0.39 */
+        printf("\nSTATISTIKA (%lu uzoraka): R srednje = %.4f ohm (T = %+.3f C), min = %.4f, max = %.4f ohm,\n"
+               "                         p-p = %.1f mohm, sigma = %.1f mohm (~%.1f mC)\n",
+               st.n, st.mean, pt100_temp(st.mean), st.min, st.max,
+               (st.max - st.min) * 1e3, sd * 1e3, sd / (PT100_R0 * PT100_A) * 1e3);
+    } else if (st.n > 1) {
         double sd = my_sqrt(st.m2 / (double)(st.n - 1));
 
         printf("\nSTATISTIKA (%lu uzoraka): srednja = %+.6f V, min = %+.6f V, max = %+.6f V, "
@@ -611,7 +696,7 @@ static int run_measurement(int fd, const test_cfg_t *c)
 
 static void usage(const char *prog)
 {
-    printf("Upotreba: %s [-p AINP] [-m AINM|avss] [-d] [-b] [-f FS] [-n N] [-k F] [-B N] [-D DEV] [-v]\n"
+    printf("Upotreba: %s [-p AINP] [-m AINM|avss] [-d] [-b] [-f FS] [-n N] [-k F] [-B N] [-t N] [-D DEV] [-v]\n"
            "  -p N     pozitivni ulaz AIN0..AIN15 (default 3)\n"
            "  -m N     negativni ulaz 0..15 ili 'avss' (default avss = single-ended)\n"
            "  -d       dijagnostika: meri (AVDD-AVSS)/6, ocekivano ~0.55 V za AVDD = 3.3 V\n"
@@ -620,6 +705,7 @@ static void usage(const char *prog)
            "  -n N     broj uzoraka (0 = do Ctrl+C)\n"
            "  -k F     faktor za prikaz napona na konektoru (npr. 4.3)\n"
            "  -B N     burnout test (provera prekinutog ulaza): 1 = 0.5 uA, 2 = 2 uA, 3 = 4 uA\n"
+           "  -t N     PT100 kanal 1..4 (IOUT0 200 uA na AIN(3N-3), merenje AIN(3N-2)-AIN(3N-1), REFIN1)\n"
            "  -D DEV   SPI uredjaj (default %s)\n"
            "  -v       ispis sirovih SPI bajtova\n", prog, SPI_DEVICE_DEFAULT);
 }
@@ -655,8 +741,10 @@ int main(int argc, char **argv)
     cfg.n_samples = 0;
     cfg.disp_factor = 1.0;
     cfg.burnout = 0;
+    cfg.pt100 = 0;
+    cfg.pga = ADC_PGA_CODE;
 
-    while ((opt = getopt(argc, argv, "p:m:dbf:n:k:B:D:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:m:dbf:n:k:B:t:D:vh")) != -1) {
         switch (opt) {
         case 'p':
             if (parse_long(optarg, 0, 15, &v) < 0) { fprintf(stderr, "-p: 0..15\n"); return EXIT_FAILURE; }
@@ -688,6 +776,10 @@ int main(int argc, char **argv)
             if (parse_long(optarg, 0, 3, &v) < 0) { fprintf(stderr, "-B: 0..3\n"); return EXIT_FAILURE; }
             cfg.burnout = (unsigned)v;
             break;
+        case 't':
+            if (parse_long(optarg, 1, 4, &v) < 0) { fprintf(stderr, "-t: 1..4\n"); return EXIT_FAILURE; }
+            cfg.pt100 = (unsigned)v;
+            break;
         case 'D': cfg.spi_dev = optarg; break;
         case 'v': g_verbose = 1; break;
         case 'h':
@@ -700,13 +792,23 @@ int main(int argc, char **argv)
     if (cfg.diag_avdd) {            /* dijagnostika: interni kanal (AVDD-AVSS)/6 */
         cfg.ainp = AIN_AVDD_DIV6_P;
         cfg.ainm = AIN_AVDD_DIV6_M;
+    } else if (cfg.pt100) {         /* PT100_N: VOUTP = AIN(3N-2), VOUTN = AIN(3N-1) */
+        cfg.ainp = (uint8_t)(3 * cfg.pt100 - 2);
+        cfg.ainm = (uint8_t)(3 * cfg.pt100 - 1);
+        cfg.pga = PT100_PGA_CODE;
     }
 
-    printf("AD4130-8 test | SPI %s | AINP=%u AINM=%u%s | %s | FS=%u (%.1f SPS) | VREF=%.3f V gain=%.0f\n\n",
+    printf("AD4130-8 test | SPI %s | AINP=%u AINM=%u%s | %s | FS=%u (%.1f SPS) | gain=%.0f\n",
            cfg.spi_dev, (unsigned)cfg.ainp, (unsigned)cfg.ainm,
            cfg.diag_avdd ? " (dijagnostika AVDD/6)" : "",
            cfg.bipolar ? "bipolarno (offset binary)" : "unipolarno (straight binary)",
-           cfg.fs, AD4130_MCLK_HZ / 32.0 / (double)cfg.fs, ADC_VREF_V, ADC_GAIN);
+           cfg.fs, AD4130_MCLK_HZ / 32.0 / (double)cfg.fs, pga_gain(&cfg));
+    if (cfg.pt100)
+        printf("PT100_%u: IOUT0 = 200 uA na AIN%u, REF = REFIN1 (Rref = %.0f ohm, bafer %s), "
+               "opseg 0..%.0f ohm\n\n", cfg.pt100, 3 * cfg.pt100 - 3, PT100_RREF_OHM,
+               PT100_REF_BUF ? "ukljucen" : "iskljucen", PT100_RREF_OHM / pga_gain(&cfg));
+    else
+        printf("VREF = %.3f V (interna)\n\n", ADC_VREF_V);
     if (cfg.burnout) {
         static const char *const ua[] = { "", "0.5", "2", "4" };
         printf("BURNOUT TEST: %s uA tece u AINP. Povezan ulaz -> mali pomak (I * R izvora),\n"
