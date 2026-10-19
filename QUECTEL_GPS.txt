@@ -1,0 +1,90 @@
+QUECTEL EG912U-GL - POKRETANJE GPS-a (GNSS)
+============================================
+
+VAZNO: modul mora biti varijanta SA GNSS-om.
+  EG912UGLAB-I05-SNNSA  -> NEMA GNSS (Mouser: "w/o GNSS, w/ BT, w/ WiFi scan")
+  Za GPS naruciti varijantu sa GNSS-om (verovatno sufiks -SGNSA; tacan kod
+  potvrditi kod distributera VitaELKO / Quectel).
+  Varijanta se cita sa nalepnice na stitu modula, ne preko AT komandi.
+
+Referenca: Quectel_EC200U_Series&EG912U-GL_GNSS_Application_Note_V1.1.pdf
+           (u ../docs/EG912U-GL-UNISOC8910-...zip, folder "01 Software")
+
+
+1. HARDVER (pre prvog testa)
+----------------------------
+- Antena na ANT_GNSS konektoru (pin 49), NE na glavnom (ANT_MAIN).
+- C67/C68 su na semi 100 pF -> treba da budu NM (nepostavljeni), inace
+  kratko spajaju GNSS signal na masu.
+- Aktivna antena trazi napajanje (3.3 V, ~30 mA) - GPIO za to jos nije poznat.
+  Za prvi test moze i pasivna antena.
+- Antena mora da "vidi nebo" (napolje ili na prozor).
+
+
+2. AT PORT
+----------
+  screen /dev/modem 115200
+  (izlaz: Ctrl+A, k, y;  ATE1 = ukljuci echo)
+
+
+3. PROVERA DA MODUL IMA GNSS
+----------------------------
+  AT+QGPS=1
+  AT+QGPSINFO          -> mora vratiti verziju GNSS-a.
+                          Prazno "+QGPSINFO: " = GNSS ne radi / ne postoji.
+  AT+QFLST="*"         -> treba da postoje UFS:boot i UFS:firm (GNSS firmver)
+
+
+4. UKLJUCIVANJE
+---------------
+  AT+QGPSCFG="outport","usbnmea"   NMEA na USB NMEA port (default)
+  AT+QGPSCFG="gnssconfig"          treba 5 = GPS + BeiDou + Galileo
+  AT+QGPS=1                        ukljuci GNSS
+  AT+QGPS?                         +QGPS: 1 = ukljucen
+
+
+5. CITANJE POZICIJE
+-------------------
+a) Preko AT komande:
+     AT+QGPSLOC=2
+     +CME ERROR: 516           -> jos nema fix-a, sacekaj i ponovi
+     +QGPSLOC: vreme,lat,lon,hdop,alt,fix,...  -> GPS radi
+
+   Cold start (prvi fix) traje 1 do nekoliko minuta.
+
+b) NMEA recenice na portu (u drugom SSH prozoru):
+     cat /dev/ttyUSB6          (ako nije taj, probati ostale ttyUSBx)
+
+   - NMEA stize svake sekunde i bez fix-a (prazna polja).
+   - $GPGSV / $GLGSV / $GBGSV: sateliti i SNR; 25-45 dB = dobro.
+     Sateliti bez SNR -> antena ne prima (napajanje, konektor, nebo).
+   - $GNGGA sa koordinatama i 6. poljem 1 ili 2 -> fix.
+
+c) NMEA preko AT komande:
+     AT+QGPSCFG="nmeasrc",1
+     AT+QGPSGNMEA="GGA"
+     AT+QGPSGNMEA="GSV"
+
+d) Brzi test bez trazenja porta - NMEA direktno u AT prozor:
+     AT+QGPSCFG="outport","usbat"
+     (posle obavezno vratiti na "usbnmea")
+
+
+6. ISKLJUCIVANJE
+----------------
+  AT+QGPSEND
+
+
+7. KORISNO
+----------
+  AT+QGPSDEL=0           brisanje pomocnih podataka -> cold start
+                         (radi samo dok je GNSS ukljucen)
+  AT+QGPSCFG="autogps",1 GNSS se sam pali pri startu modula
+
+  Kodovi gresaka:
+    505  GNSS nije ukljucen
+    507  funkcija nije omogucena (npr. nmeasrc=0 za QGPSGNMEA)
+    516  nema fix-a
+    501  nevazeci parametar
+
+  Default podesavanja (FW A12): apflash 1, autogps 0, urc 0x1, gnssconfig 5.
