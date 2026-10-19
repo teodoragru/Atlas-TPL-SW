@@ -21,7 +21,8 @@
  *   -b       bipolarno (offset binary) kodiranje            (podrazumevano unipolarno / straight binary)
  *   -f FS    FS filtera sinc3, 1..2047                      (podrazumevano 48 -> 50 SPS)
  *   -n N     broj uzoraka, 0 = do Ctrl+C                    (podrazumevano 0)
- *   -k F     faktor za prikaz napona na konektoru           (podrazumevano 1.0, za Vin kanale 4.3)
+ *   -k F     faktor za prikaz napona na konektoru           (podrazumevano 4.3 za single-ended
+ *            (AINM = AVSS), inace 1.0)
  *   -B N     burnout test (provera prekinutog ulaza): struja u AINP
  *            1 = 0.5 uA, 2 = 2 uA, 3 = 4 uA                  (podrazumevano 0 = iskljuceno)
  *   -t N     PT100 kanal 1..4: 4-zicno ratiometrijsko merenje (IOUT0 200 uA, REFIN1 = Rref 4k99,
@@ -31,7 +32,7 @@
  *   -h       pomoc
  *
  * Primeri:
- *   ./ad4130_test -p 3 -k 4.3      AIN3 prema AVSS, prikazuje i napon * 4.3
+ *   ./ad4130_test -p 3             AIN3 prema AVSS, prikazuje i napon * 4.3
  *   ./ad4130_test -d -n 50         dijagnostika, ocekivano ~0.55 V (AVDD = 3.3 V)
  *   ./ad4130_test -t 1 -n 50       PT100_1 (IOUT AIN0, merenje AIN1-AIN2), 100 ohm -> ~0 C
  *   ./ad4130_test -p 4 -m 5        diferencijalno AIN4 - AIN5 (strujni ulaz Iin1)
@@ -66,6 +67,7 @@
 #define ADC_VREF_V          2.5         /* interna referenca, INT_REF_VAL = 0 -> 2.5 V   */
 #define ADC_PGA_CODE        0           /* PGA_n za naponski rezim: 0 -> gain 1          */
 #define AD4130_MCLK_HZ      76800.0     /* interni oscilator                             */
+#define SE_DISP_FACTOR      (43.0 / 10.0) /* single-ended (AINM = AVSS): Vkonektor = Vadc * 4.3 */
 
 #define USE_CS_PIN          1           /* 1 = CSB_EN=1 (4-wire, CS uokviruje transfer),
                                            0 = CSB_EN=0 (3-wire, CS se ignorise).
@@ -703,7 +705,7 @@ static void usage(const char *prog)
            "  -b       bipolarno (offset binary) kodiranje (default unipolarno)\n"
            "  -f FS    FS sinc3 filtera 1..2047 (default 48 -> 50 SPS); ODR = 76800/32/FS\n"
            "  -n N     broj uzoraka (0 = do Ctrl+C)\n"
-           "  -k F     faktor za prikaz napona na konektoru (npr. 4.3)\n"
+           "  -k F     faktor za prikaz napona na konektoru (default 4.3 za single-ended, inace 1)\n"
            "  -B N     burnout test (provera prekinutog ulaza): 1 = 0.5 uA, 2 = 2 uA, 3 = 4 uA\n"
            "  -t N     PT100 kanal 1..4 (IOUT0 200 uA na AIN(3N-3), merenje AIN(3N-2)-AIN(3N-1), REFIN1)\n"
            "  -D DEV   SPI uredjaj (default %s)\n"
@@ -725,7 +727,7 @@ static int parse_long(const char *s, long lo, long hi, long *out)
 int main(int argc, char **argv)
 {
     test_cfg_t cfg;
-    int opt, fd, rc;
+    int opt, fd, rc, k_set = 0;
     long v;
     uint8_t mode = SPI_MODE_AD4130;
     uint8_t bits = SPI_BITS;
@@ -770,6 +772,7 @@ int main(int argc, char **argv)
             double k = strtod(optarg, &end);
             if (end == optarg || *end != '\0' || k == 0.0) { fprintf(stderr, "-k: broj != 0\n"); return EXIT_FAILURE; }
             cfg.disp_factor = k;
+            k_set = 1;
             break;
         }
         case 'B':
@@ -797,6 +800,9 @@ int main(int argc, char **argv)
         cfg.ainm = (uint8_t)(3 * cfg.pt100 - 1);
         cfg.pga = PT100_PGA_CODE;
     }
+    /* bez -k: single-ended naponski ulaz se mnozi sa 4.3, diferencijalno / dijagnostika / PT100 ne */
+    if (!k_set)
+        cfg.disp_factor = (!cfg.diag_avdd && !cfg.pt100 && cfg.ainm == AIN_AVSS) ? SE_DISP_FACTOR : 1.0;
 
     printf("AD4130-8 test | SPI %s | AINP=%u AINM=%u%s | %s | FS=%u (%.1f SPS) | gain=%.0f\n",
            cfg.spi_dev, (unsigned)cfg.ainp, (unsigned)cfg.ainm,

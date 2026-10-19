@@ -30,7 +30,7 @@
 
 
 /* SPI za Atlas-TPL_AI */
-#define SPI_DEVICE          "/dev/spidev0.0" // SPI putanja 
+#define SPI_DEVICE          "/dev/spidev1.0" // SPI putanja 
 
 
 /* UART dAPV    */

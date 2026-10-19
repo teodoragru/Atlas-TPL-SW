@@ -1,0 +1,134 @@
+Naslov: EG912U-GL se ne registruje na mrežu (LIMSRV, CEREG ostaje 2, CEER 0,-1)
+
+Modul:    Quectel EG912U (GL)
+Revizija: EG912UGLAAR03A12M08
+FW:       EG912UGLAAR03A12M08_01.200.01.200
+IMEI:     869487060505228
+Host:     sopstvena ploča (Allwinner H3 / NanoPi), modem povezan preko USB-a (2c7c:0901)
+Operator: MTS Srbija (MCC 220, MNC 03), APN "gprsinternet"
+
+PROBLEM
+Modul čita SIM, vidi mreže i zakači se na MTS LTE ćeliju sa dobrim prijemom,
+ali se nikad ne registruje. Ostaje u stanju LIMSRV, +CEREG stoji na 2 (traži
+mrežu) i nikad ne pređe u 1 (registrovan) ni u 3 (odbijen). AT+CEER vraća
+0,-1, odnosno mreža ne šalje razlog odbijanja. Isto se dešava na LTE B3,
+LTE B20 i na GSM-u (ručni izbor mreže).
+
+ŠTA JE VEĆ ISKLJUČENO
+- SIM: dve različite MTS kartice, obe rade u telefonu na istoj lokaciji.
+- APN: ispravan za MTS.
+- IMEI: 15 cifara, Luhn provera prolazi.
+- Antena i RF putanja: antena je na ANT_MAIN (pin 60), preko 0R i rednog
+  kondenzatora 100 pF (kao u referentnom dizajnu). Prijem je dobar
+  (RSRP/RSRQ ispod).
+- Napajanje: AT+CBC = 3789 mV. Na osciloskopu na VBAT_RF (pinovi 52, 53)
+  nema propada napona tokom pokušaja registracije. Nema neočekivanog RDY
+  (modul se ne resetuje).
+- Firmware modula nismo menjali (nije flešovan).
+
+AT KOMANDE I ODGOVORI
+--------------------------------------------------------------------------
+ATI
+  Quectel
+  EG912U
+  Revision: EG912UGLAAR03A12M08
+  OK
+
+AT+QGMR
+  EG912UGLAAR03A12M08_01.200.01.200
+  OK
+
+AT+GSN
+  869487060505228
+
+AT+CPIN?
+  +CPIN: READY
+
+AT+CIMI
+  220033401760327
+
+AT+QCCID
+  89381030000356397457
+
+AT+CSQ
+  +CSQ: 16,99
+
+AT+CBC
+  napon 3789 mV
+
+AT+CGDCONT?
+  +CGDCONT: 1,"IP","gprsinternet",...
+
+AT+QCFG="nwscanmode"
+  +QCFG: "nwscanmode",0
+
+AT+QCFG="band"
+  +QCFG: "band",0xf,0x2000001e20b0f18df
+
+AT+COPS=?
+  prikazani su MTS LTE (trenutni), MTS GSM, Yettel LTE i Yettel GSM
+
+AT+COPS?
+  +COPS: 0
+
+AT+QNWINFO
+  +QNWINFO: "No Service"
+
+AT+CREG?    ->  +CREG: 0,2
+AT+CGREG?   ->  +CGREG: 0,2
+AT+CEREG?   ->  +CEREG: 0,0
+AT+CGATT?   ->  +CGATT: 0
+
+AT+CEER
+  +CEER: 0,-1
+
+--- Pokušaj registracije sa uključenim URC porukama ---
+AT+QURCCFG="urcport","usbmodem"
+ATE1
+AT+CMEE=2
+AT+CREG=2
+AT+CGREG=2
+AT+CEREG=2
+AT+CFUN=0
+  +CREG: 0
+  +CGREG: 0
+  +CEREG: 0
+AT+CFUN=1
+  OK
+  +CPIN: READY
+  +QUSIM: 1
+  +QIND: SMS DONE
+  +CREG: 2,"4EF4","0024204",7
+  +CGREG: 2,"4EF4","0024204",7
+  +CEREG: 2,"4EF4","0024204",7
+  +QIND: PB DONE
+  +CREG: 2,"4EF4","0024202",7
+  +CGREG: 2,"4EF4","0024202",7
+  +CEREG: 2,"4EF4","0024202",7
+  (čekali smo više od 3 minuta: stanje se smenjuje između ćelija 0024204
+   i 0024202, povremeno +CEREG: 0, nikad 1 ni 3)
+
+AT+QENG="servingcell"   (unutra)
+  +QENG: "servingcell","LIMSRV","LTE","FDD",220,03,...,1500,3,...,4EF4,-102,-9,...
+  (B3, EARFCN 1500, RSRP -102 dBm, RSRQ -9 dB)
+
+AT+QENG="servingcell"   (antena napolju)
+  +QENG: "servingcell","LIMSRV","LTE","FDD",220,03,24202,105,1500,3,5,5,4EF4,-118,-10,-89,51,3
+
+AT+CEER
+  +CEER: 0,-1
+
+--- Ručna registracija na GSM ---
+AT+COPS=1,2,"22003",0
+  +CME ERROR: no network service
+AT+COPS=0
+--------------------------------------------------------------------------
+
+PITANJA
+1. Da li postoji poznat problem sa registracijom na firmware-u
+   EG912UGLAAR03A12M08_01.200.01.200 i da li preporučujete noviju verziju?
+2. Da li postoji način da proverimo da li modul predaje (TX snaga / RF test
+   komanda) ili da li su njegovi RF kalibracioni podaci ispravni?
+3. Pošto prijem radi, a mreža nikad ne odgovori na zahtev za registraciju
+   (nema razloga odbijanja), da li može biti u pitanju TX / hardverska
+   greška modula? Da li preporučujete RMA (zamenu modula)?

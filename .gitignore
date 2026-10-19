@@ -24,3 +24,6 @@ lex.yy.c
 
 # Fajlovi nastali greskom kod scp bez ':' (npr. scp fajl root@10.1.49.17)
 root@*
+
+# Claude Code lokalni fajlovi (worktree-i, podesavanja)
+.claude/
